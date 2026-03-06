@@ -5,6 +5,7 @@ import com.creedpetitt.orchestrator.dto.TriggerWorkflowRequest;
 import com.creedpetitt.orchestrator.model.WorkflowDefinition;
 import com.creedpetitt.orchestrator.model.WorkflowRun;
 import com.creedpetitt.orchestrator.service.WorkflowService;
+import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
@@ -20,13 +21,13 @@ public class WorkflowController {
         this.workflowService = workflowService;
     }
 
-    @PostMapping("/")
+    @PostMapping
     public ResponseEntity<String> createWorkflow(@RequestBody CreateWorkflowRequest req) {
         String id = workflowService.createWorkflow(req);
-        return ResponseEntity.ok(id);
+        return ResponseEntity.status(HttpStatus.CREATED).body(id);
     }
 
-    @GetMapping("/")
+    @GetMapping
     public ResponseEntity<List<WorkflowDefinition>> getAllWorkflows() {
         return ResponseEntity.ok(workflowService.getAllWorkflows());
     }
