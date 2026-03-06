@@ -1,14 +1,16 @@
 package com.creedpetitt.orchestrator.model;
 
 import jakarta.persistence.*;
-import lombok.Data;
+import lombok.Getter;
+import lombok.Setter;
 
 import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.List;
 
 @Entity
-@Data
+@Getter
+@Setter
 @Table(name = "workflow_run")
 public class WorkflowRun {
 

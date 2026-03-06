@@ -1,9 +1,12 @@
 package com.creedpetitt.orchestrator.model;
 
+import com.fasterxml.jackson.annotation.JsonIgnore;
 import jakarta.persistence.*;
-import lombok.Data;
+import lombok.Getter;
+import lombok.Setter;
 
-@Data
+@Getter
+@Setter
 @Entity
 @Table(name = "workflow_step")
 public class WorkflowStep {
@@ -20,6 +23,7 @@ public class WorkflowStep {
 
     @ManyToOne
     @JoinColumn(name = "workflow_definition_id")
+    @JsonIgnore
     private WorkflowDefinition workflowDefinition;
 
 }
