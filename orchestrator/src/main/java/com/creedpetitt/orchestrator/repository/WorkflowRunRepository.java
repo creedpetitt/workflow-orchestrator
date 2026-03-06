@@ -6,10 +6,13 @@ import org.springframework.stereotype.Repository;
 
 import java.time.LocalDateTime;
 import java.util.List;
+import java.util.Optional;
 
 @Repository
 public interface WorkflowRunRepository
         extends JpaRepository<WorkflowRun, String> {
+
+    Optional<WorkflowRun> findByIdempotencyKey(String idempotencyKey);
 
     List<WorkflowRun> findByWorkflowId(String workflowId);
 

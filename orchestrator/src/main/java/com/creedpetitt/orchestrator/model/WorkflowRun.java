@@ -41,4 +41,7 @@ public class WorkflowRun {
     @Column
     private String finalOutput;
 
+    @Column(unique = true)
+    private String idempotencyKey;
+
 }
