@@ -5,6 +5,8 @@ import com.creedpetitt.orchestrator.dto.CreateWorkflowRequest;
 import com.creedpetitt.orchestrator.dto.ResultMessage;
 import com.creedpetitt.orchestrator.dto.TriggerWorkflowRequest;
 import com.creedpetitt.orchestrator.dto.JobMessage;
+import com.creedpetitt.orchestrator.exception.ResourceNotFoundException;
+import com.creedpetitt.orchestrator.exception.WorkflowExecutionException;
 import com.creedpetitt.orchestrator.model.StepResult;
 import com.creedpetitt.orchestrator.model.WorkflowDefinition;
 import com.creedpetitt.orchestrator.model.WorkflowRun;
@@ -84,7 +86,7 @@ public class WorkflowService {
         }
 
         WorkflowDefinition workflow = workflowRepo.findById(id)
-                .orElseThrow(() -> new RuntimeException("Workflow not found" + id));
+                .orElseThrow(() -> new ResourceNotFoundException("Workflow definition not found: " + id));
 
         WorkflowRun run = new WorkflowRun();
         run.setRunId(runId);
@@ -101,7 +103,7 @@ public class WorkflowService {
             String runJson = objectMapper.writeValueAsString(run);
             redisTemplate.opsForValue().set(key, runJson, Duration.ofHours(24));
         } catch (Exception e) {
-            throw new RuntimeException("Failed to save workflow run to Redis", e);
+            throw new WorkflowExecutionException("Failed to save workflow run to Redis", e);
         }
 
         WorkflowStep firstStep = workflow.getSteps().getFirst();
@@ -112,7 +114,7 @@ public class WorkflowService {
             String jobJson = objectMapper.writeValueAsString(job);
             kafkaTemplate.send(Topics.WORKFLOW_JOBS, jobJson);
         } catch (Exception e) {
-            throw new RuntimeException("Failed to send job to Kafka", e);
+            throw new WorkflowExecutionException("Failed to send job to Kafka", e);
         }
 
         return runId;
@@ -134,13 +136,13 @@ public class WorkflowService {
         String json = redisTemplate.opsForValue().get(key);
 
         if (json == null) {
-            throw new RuntimeException("workflow run not found:" + runId);
+            throw new ResourceNotFoundException("Workflow run not found: " + runId);
         }
 
         try {
             return objectMapper.readValue(json, WorkflowRun.class);
         } catch (Exception e) {
-            throw new RuntimeException("could not deserialize workflow run:" + runId, e);
+            throw new WorkflowExecutionException("Could not deserialize workflow run: " + runId, e);
         }
     }
 
@@ -172,8 +174,9 @@ public class WorkflowService {
             return;
         }
 
-        WorkflowDefinition workflow = workflowRepo.findById(run.getWorkflowId())
-                .orElseThrow(() -> new RuntimeException("Workflow not found"));
+        String workflowId = run.getWorkflowId();
+        WorkflowDefinition workflow = workflowRepo.findById(workflowId)
+                .orElseThrow(() -> new ResourceNotFoundException("Workflow definition not found for run: " + workflowId));
 
         int totalSteps =  workflow.getSteps().size();
 
@@ -195,7 +198,7 @@ public class WorkflowService {
                 String updatedJson =  objectMapper.writeValueAsString(run);
                 redisTemplate.opsForValue().set(key, updatedJson, Duration.ofHours(24));
             } catch (Exception e) {
-                throw new RuntimeException("Failed to update redis: " + e.getMessage(), e);
+                throw new WorkflowExecutionException("Failed to update Redis: " + e.getMessage(), e);
             }
 
             log.info("Workflow completed: {}", run.getRunId());
