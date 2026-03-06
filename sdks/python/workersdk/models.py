@@ -21,10 +21,12 @@ class ResultMessage:
     workflow_run_id: str
     action: str
     result: str
+    status: str
 
     def to_dict(self):
         return {
             'workflowRunId': self.workflow_run_id,
             'action': self.action,
-            'result': self.result
+            'result': self.result,
+            'status': self.status
         }

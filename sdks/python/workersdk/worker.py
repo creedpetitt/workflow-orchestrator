@@ -58,11 +58,13 @@ class Worker:
 
             try:
                 result = handler(job.payload)
+                status = "SUCCESS"
             except Exception as e:
                 # Safely construct JSON error
                 result = json.dumps({"error": str(e)})
+                status = "FAILED"
 
-            response = ResultMessage(job.workflow_run_id, job.action, result)
+            response = ResultMessage(job.workflow_run_id, job.action, result, status)
 
             self.producer.send('workflow-results', value=response.to_dict())
 

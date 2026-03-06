@@ -8,4 +8,5 @@ export interface ResultMessage {
     workflowRunId: string;
     action: string;
     result: string;
+    status: string;
 }

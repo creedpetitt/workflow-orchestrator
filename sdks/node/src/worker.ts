@@ -60,16 +60,19 @@ export class Worker {
                 }
 
                 let result: string;
+                let status: string = "SUCCESS";
                 try {
                     result = handler(job.payload);
                 } catch (e) {
+                    status = "FAILED";
                     result = JSON.stringify({ error: String(e) });
                 }
 
                 const response: ResultMessage = {
                     workflowRunId: job.workflowRunId,
                     action: job.action,
-                    result: result
+                    result: result,
+                    status: status
                 }
 
                 await this.producer!.send({

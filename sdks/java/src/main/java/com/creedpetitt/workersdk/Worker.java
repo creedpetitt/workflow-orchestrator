@@ -61,9 +61,11 @@ public class Worker {
                 System.out.println("Processing job: " + msg.action());
 
                 String output;
+                String status = "SUCCESS";
                 try {
                     output = handler.handle(msg.payload());
                 } catch (Exception e) {
+                    status = "FAILED";
                     // Properly serialize the error using Jackson
                     Map<String, String> errorMap = new HashMap<>();
                     errorMap.put("error", e.getMessage());
@@ -75,11 +77,15 @@ public class Worker {
                 }
 
                 ResultMessage res =
-                        new ResultMessage(msg.workflowRunId(), msg.action(), output);
+                        new ResultMessage(msg.workflowRunId(), msg.action(), output, status);
 
-                producer.send(
-                        new ProducerRecord<>("workflow-results", serializeResult(res))
-                );
+                try {
+                    producer.send(
+                            new ProducerRecord<>("workflow-results", serializeResult(res))
+                    );
+                } catch (Exception e) {
+                    System.err.println("Failed to serialize or send result: " + e.getMessage());
+                }
             }
         }
     }
