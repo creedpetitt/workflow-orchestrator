@@ -44,12 +44,18 @@ export class Worker {
         await this.consumer.run({
             eachMessage : async ({message}) => {
 
-                const job: JobMessage = JSON.parse(message.value!.toString());
+                let job: JobMessage;
+                try {
+                    job = JSON.parse(message.value!.toString());
+                } catch (e) {
+                    console.error("Failed to parse message as JSON, skipping poison pill:", e);
+                    return;
+                }
 
                 const handler: any = this.handlers.get(job.action);
 
                 if(!handler) {
-                    console.log(`No handler for ${job.action}`);
+                    // Silently ignore, this message might be meant for a different worker group type
                     return;
                 }
 

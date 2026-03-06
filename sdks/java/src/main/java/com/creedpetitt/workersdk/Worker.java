@@ -19,46 +19,59 @@ public class Worker {
     private KafkaConsumer<String, String> consumer;
     private KafkaProducer<String, String> producer;
     private String bootstrapServers;
+    private String groupId;
 
     public void register(String action, Handler handler) {
         handlers.put(action, handler);
     }
 
     public void start() {
-        start("kafka:9092");
+        start("kafka:9092", "workflow-workers-java");
     }
 
-    public void start(String bootstrapServers) {
+    public void start(String bootstrapServers, String groupId) {
 
         this.bootstrapServers = bootstrapServers;
+        this.groupId = groupId;
 
-        // Init consumer and producer
-        this.consumer = new KafkaConsumer<>(getConsumerProps());
-        this.producer = new KafkaProducer<>(getProducerProps());
+        connectWithRetry();
 
         consumer.subscribe(Collections.singleton("workflow-jobs"));
 
-        System.out.println("Workflow started, listening for jobs...");
+        System.out.println("Worker started, listening for jobs in group: " + groupId);
 
         while (true) {
             var records = consumer.poll(Duration.ofMillis(100));
 
             for (ConsumerRecord<String, String> record : records) {
-                JobMessage msg = deserializeJob(record.value());
-
-                System.out.println("Received job: " + msg);
+                JobMessage msg;
+                try {
+                    msg = deserializeJob(record.value());
+                } catch (Exception e) {
+                    System.err.println("Failed to deserialize job, skipping. Error: " + e.getMessage());
+                    continue; // Poison pill protection
+                }
 
                 Handler handler = handlers.get(msg.action());
                 if (handler == null) {
-                    System.err.println("No handler for " + msg.action());
-                    continue;
+                    // System.out.println("No handler for " + msg.action() + " in this worker.");
+                    continue; // Correctly ignore messages meant for other worker types
                 }
+
+                System.out.println("Processing job: " + msg.action());
 
                 String output;
                 try {
                     output = handler.handle(msg.payload());
                 } catch (Exception e) {
-                    output = "{\"error\":\"" + e.getMessage() + "\"}";
+                    // Properly serialize the error using Jackson
+                    Map<String, String> errorMap = new HashMap<>();
+                    errorMap.put("error", e.getMessage());
+                    try {
+                        output = MAPPER.writeValueAsString(errorMap);
+                    } catch (Exception jsonEx) {
+                        output = "{\"error\":\"Serialization failed\"}";
+                    }
                 }
 
                 ResultMessage res =
@@ -71,21 +84,36 @@ public class Worker {
         }
     }
 
-    // Serialize/deserialize helper methods
-    private String serializeResult(ResultMessage result) {
-        try {
-            return MAPPER.writeValueAsString(result);
-        } catch (Exception e) {
-            throw new RuntimeException(e);
+    private void connectWithRetry() {
+        int maxAttempts = 30;
+        for (int attempt = 1; attempt <= maxAttempts; attempt++) {
+            try {
+                this.consumer = new KafkaConsumer<>(getConsumerProps());
+                this.producer = new KafkaProducer<>(getProducerProps());
+                // Test the connection
+                this.consumer.partitionsFor("workflow-jobs"); 
+                return;
+            } catch (Exception e) {
+                System.out.println("Kafka not ready, retrying (" + attempt + "/" + maxAttempts + ")...");
+                try {
+                    Thread.sleep(2000);
+                } catch (InterruptedException ie) {
+                    Thread.currentThread().interrupt();
+                }
+                if (attempt == maxAttempts) {
+                    throw new RuntimeException("Could not connect to Kafka after " + maxAttempts + " attempts", e);
+                }
+            }
         }
     }
 
-    private JobMessage deserializeJob(String json) {
-        try {
-            return MAPPER.readValue(json, JobMessage.class);
-        } catch (Exception e) {
-            throw new RuntimeException(e);
-        }
+    // Serialize/deserialize helper methods
+    private String serializeResult(ResultMessage result) throws Exception {
+        return MAPPER.writeValueAsString(result);
+    }
+
+    private JobMessage deserializeJob(String json) throws Exception {
+        return MAPPER.readValue(json, JobMessage.class);
     }
 
     // Kafka consumer/producer properties
@@ -96,7 +124,7 @@ public class Worker {
                 "org.apache.kafka.common.serialization.StringDeserializer");
         consumerProps.put("value.deserializer",
                 "org.apache.kafka.common.serialization.StringDeserializer");
-        consumerProps.put("group.id", "workflow-workers");
+        consumerProps.put("group.id", groupId);
         consumerProps.put("auto.offset.reset", "earliest");
 
         return consumerProps;
