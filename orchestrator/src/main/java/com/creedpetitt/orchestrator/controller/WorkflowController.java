@@ -32,6 +32,11 @@ public class WorkflowController {
         return ResponseEntity.ok(workflowService.getAllWorkflows());
     }
 
+    @GetMapping("/{id}")
+    public ResponseEntity<WorkflowDefinition> getWorkflow(@PathVariable String id) {
+        return ResponseEntity.ok(workflowService.getWorkflow(id));
+    }
+
     @PostMapping("/{id}/trigger")
     public ResponseEntity<String> triggerWorkflow(
             @PathVariable String id,
@@ -43,9 +48,14 @@ public class WorkflowController {
     }
 
     @GetMapping("/run/{runId}")
-    public ResponseEntity<WorkflowRun> getWorkflow(@PathVariable String runId) {
+    public ResponseEntity<WorkflowRun> getRunStatus(@PathVariable String runId) {
         WorkflowRun run = workflowService.getRunStatus(runId);
         return ResponseEntity.ok(run);
+    }
+
+    @GetMapping("/{id}/runs")
+    public ResponseEntity<List<WorkflowRun>> getRunsForWorkflow(@PathVariable String id) {
+        return ResponseEntity.ok(workflowService.getRuns(id, null));
     }
 
     @GetMapping("/runs")

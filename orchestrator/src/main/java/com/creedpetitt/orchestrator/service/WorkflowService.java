@@ -95,6 +95,11 @@ public class WorkflowService {
         return workflowRepo.findAll();
     }
 
+    public WorkflowDefinition getWorkflow(String id) {
+        return workflowRepo.findById(id)
+                .orElseThrow(() -> new ResourceNotFoundException("Workflow definition not found: " + id));
+    }
+
     public List<WorkflowRun> getRuns(String workflowId, String status) {
         if (workflowId != null && status != null) {
             return workflowRunRepo.findByWorkflowIdAndStatus(workflowId, status);
