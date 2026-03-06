@@ -43,6 +43,12 @@ public class WorkflowJob {
     @Column
     private LocalDateTime updatedAt;
 
+    @Column
+    private int retryCount = 0;
+
+    @Column
+    private int maxRetries = 3;
+
     @PrePersist
     protected void onCreate() {
         createdAt = LocalDateTime.now();
