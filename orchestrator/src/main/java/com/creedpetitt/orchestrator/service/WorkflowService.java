@@ -12,16 +12,19 @@ import com.creedpetitt.orchestrator.model.WorkflowStep;
 import com.creedpetitt.orchestrator.repository.WorkflowDefinitionRepository;
 import com.creedpetitt.orchestrator.repository.WorkflowRunRepository;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.data.redis.core.RedisTemplate;
 import org.springframework.kafka.annotation.KafkaListener;
 import org.springframework.kafka.core.KafkaTemplate;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 
 import java.time.Duration;
 import java.time.LocalDateTime;
 import java.util.List;
 import java.util.UUID;
 
+@Slf4j
 @Service
 public class WorkflowService {
 
@@ -44,6 +47,7 @@ public class WorkflowService {
         this.objectMapper = objectMapper;
     }
 
+    @Transactional
     public String createWorkflow(CreateWorkflowRequest req) {
 
         WorkflowDefinition workflow = new WorkflowDefinition();
@@ -65,6 +69,7 @@ public class WorkflowService {
         return workflow.getId();
     }
 
+    @Transactional
     public String triggerWorkflow(String id, TriggerWorkflowRequest req, String idempotencyKey) {
 
         String runId = UUID.randomUUID().toString();
@@ -73,7 +78,7 @@ public class WorkflowService {
         if (idempotencyKey != null && !idempotencyKey.isEmpty()) {
             Boolean isNew = redisTemplate.opsForValue().setIfAbsent("idempotency:" + idempotencyKey, runId, Duration.ofHours(24));
             if (Boolean.FALSE.equals(isNew)) {
-                System.out.println("Idempotency hit for key: " + idempotencyKey);
+                log.info("Idempotency hit for key: {}", idempotencyKey);
                 return redisTemplate.opsForValue().get("idempotency:" + idempotencyKey);
             }
         }
@@ -96,7 +101,7 @@ public class WorkflowService {
             String runJson = objectMapper.writeValueAsString(run);
             redisTemplate.opsForValue().set(key, runJson, Duration.ofHours(24));
         } catch (Exception e) {
-            throw new RuntimeException("Failed to save workflow run to Redis",e);
+            throw new RuntimeException("Failed to save workflow run to Redis", e);
         }
 
         WorkflowStep firstStep = workflow.getSteps().getFirst();
@@ -107,7 +112,7 @@ public class WorkflowService {
             String jobJson = objectMapper.writeValueAsString(job);
             kafkaTemplate.send(Topics.WORKFLOW_JOBS, jobJson);
         } catch (Exception e) {
-            throw new RuntimeException("Failed to send job to Kafka",e);
+            throw new RuntimeException("Failed to send job to Kafka", e);
         }
 
         return runId;
@@ -139,6 +144,7 @@ public class WorkflowService {
         }
     }
 
+    @Transactional
     @KafkaListener(topics = Topics.WORKFLOW_RESULTS)
     public void processResult(String message) {
 
@@ -146,7 +152,7 @@ public class WorkflowService {
         try {
             result = objectMapper.readValue(message, ResultMessage.class);
         } catch (Exception e) {
-            System.err.println("Could not deserialize workflow run:" + message);
+            log.error("Could not deserialize workflow result: {}", message, e);
             return;
         }
 
@@ -154,7 +160,7 @@ public class WorkflowService {
         String runJson = redisTemplate.opsForValue().get(key);
 
         if (runJson == null) {
-            System.err.println("workflow run not found:" + result.workflowRunId());
+            log.error("workflow run not found: {}", result.workflowRunId());
             return;
         }
 
@@ -162,7 +168,7 @@ public class WorkflowService {
         try {
             run = objectMapper.readValue(runJson, WorkflowRun.class);
         } catch (Exception e) {
-            System.err.println("Could not deserialize workflow run:" + runJson + e.getMessage());
+            log.error("Could not deserialize workflow run: {}", runJson, e);
             return;
         }
 
@@ -189,10 +195,10 @@ public class WorkflowService {
                 String updatedJson =  objectMapper.writeValueAsString(run);
                 redisTemplate.opsForValue().set(key, updatedJson, Duration.ofHours(24));
             } catch (Exception e) {
-                throw new RuntimeException("Faild to update redis: " + e.getMessage());
+                throw new RuntimeException("Failed to update redis: " + e.getMessage(), e);
             }
 
-            System.out.println("Workflow completed" + run.getRunId());
+            log.info("Workflow completed: {}", run.getRunId());
 
         } else {
             run.setCurrentStep(run.getCurrentStep() + 1);
@@ -202,7 +208,7 @@ public class WorkflowService {
                 String updatedJson = objectMapper.writeValueAsString(run);
                 redisTemplate.opsForValue().set(key, updatedJson, Duration.ofHours(24));
             } catch (Exception e) {
-                System.err.println("Failed to update Redis: " + e.getMessage());
+                log.error("Failed to update Redis", e);
                 return;
             }
 
@@ -217,9 +223,9 @@ public class WorkflowService {
             try {
                 String jobJson = objectMapper.writeValueAsString(job);
                 kafkaTemplate.send(Topics.WORKFLOW_JOBS, jobJson);
-                System.out.println("Sent next job: " + nextStep.getAction());
+                log.info("Sent next job: {}", nextStep.getAction());
             } catch (Exception e) {
-                System.err.println("Failed to send next job: " + e.getMessage());
+                log.error("Failed to send next job", e);
             }
         }
     }
