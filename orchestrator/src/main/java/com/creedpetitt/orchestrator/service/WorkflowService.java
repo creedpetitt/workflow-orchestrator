@@ -69,24 +69,19 @@ public class WorkflowService {
 
     public String triggerWorkflow(String id, TriggerWorkflowRequest req, String idempotencyKey) {
 
+        String runId = UUID.randomUUID().toString();
+
         // Idempotency Check
         if (idempotencyKey != null && !idempotencyKey.isEmpty()) {
-            String existingRunId = redisTemplate.opsForValue().get("idempotency:" + idempotencyKey);
-            if (existingRunId != null) {
+            Boolean isNew = redisTemplate.opsForValue().setIfAbsent("idempotency:" + idempotencyKey, runId, Duration.ofHours(24));
+            if (Boolean.FALSE.equals(isNew)) {
                 System.out.println("Idempotency hit for key: " + idempotencyKey);
-                return existingRunId;
+                return redisTemplate.opsForValue().get("idempotency:" + idempotencyKey);
             }
         }
 
         WorkflowDefinition workflow = workflowRepo.findById(id)
                 .orElseThrow(() -> new RuntimeException("Workflow not found" + id));
-
-        String runId = UUID.randomUUID().toString();
-
-        // Save Idempotency Key (if present)
-        if (idempotencyKey != null && !idempotencyKey.isEmpty()) {
-            redisTemplate.opsForValue().set("idempotency:" + idempotencyKey, runId, Duration.ofHours(24));
-        }
 
         WorkflowRun run = new WorkflowRun();
         run.setRunId(runId);
@@ -95,6 +90,8 @@ public class WorkflowService {
         run.setStatus("RUNNING");
         run.setStartTime(LocalDateTime.now());
         run.setInput(req.input());
+
+        workflowRunRepo.save(run);
 
         String key = "workflow:run:" + runId;
         try {
@@ -201,6 +198,7 @@ public class WorkflowService {
 
         } else {
             run.setCurrentStep(run.getCurrentStep() + 1);
+            workflowRunRepo.save(run);
 
             try {
                 String updatedJson = objectMapper.writeValueAsString(run);
