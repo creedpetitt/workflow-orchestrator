@@ -49,7 +49,9 @@ public class WorkflowController {
     }
 
     @GetMapping("/runs")
-    public ResponseEntity<List<WorkflowRun>> getAllRuns() {
-        return ResponseEntity.ok(workflowService.getAllRuns());
+    public ResponseEntity<List<WorkflowRun>> getAllRuns(
+            @RequestParam(required = false) String workflowId,
+            @RequestParam(required = false) String status) {
+        return ResponseEntity.ok(workflowService.getRuns(workflowId, status));
     }
 }

@@ -95,8 +95,16 @@ public class WorkflowService {
         return workflowRepo.findAll();
     }
 
-    public List<WorkflowRun> getAllRuns() {
-        return workflowRunRepo.findAllByOrderByStartTimeDesc();
+    public List<WorkflowRun> getRuns(String workflowId, String status) {
+        if (workflowId != null && status != null) {
+            return workflowRunRepo.findByWorkflowIdAndStatus(workflowId, status);
+        } else if (workflowId != null) {
+            return workflowRunRepo.findByWorkflowId(workflowId);
+        } else if (status != null) {
+            return workflowRunRepo.findByStatus(status);
+        } else {
+            return workflowRunRepo.findAllByOrderByStartTimeDesc();
+        }
     }
 
     public WorkflowRun getRunStatus(String runId) {
@@ -124,12 +132,25 @@ public class WorkflowService {
 
         recordStepResult(run, result);
 
-        int totalSteps = workflow.getSteps().size();
-        if (run.getCurrentStep() >= totalSteps - 1) {
-            handleWorkflowCompletion(run, result.result());
+        if ("FAILED".equals(result.status())) {
+            handleWorkflowFailure(run, result.result());
         } else {
-            handleNextStep(run, workflow, result.result());
+            int totalSteps = workflow.getSteps().size();
+            if (run.getCurrentStep() >= totalSteps - 1) {
+                handleWorkflowCompletion(run, result.result());
+            } else {
+                handleNextStep(run, workflow, result.result());
+            }
         }
+    }
+
+    private void handleWorkflowFailure(WorkflowRun run, String errorResult) {
+        run.setStatus("FAILED");
+        run.setEndTime(LocalDateTime.now());
+        run.setFinalOutput(errorResult);
+        
+        workflowRunRepo.save(run);
+        log.error("Workflow failed: {} with error: {}", run.getRunId(), errorResult);
     }
 
     private WorkflowRun initializeWorkflowRun(String runId, String workflowId, String input, String idempotencyKey) {
