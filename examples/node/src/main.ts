@@ -2,12 +2,10 @@ import { Worker } from 'workersdk';
 
 const worker = new Worker();
 
-worker.register('step1', (payload: string) => {
-    return `step1-result: processed ${payload}`;
-});
-
-worker.register('step2', (payload: string) => {
-    return `step2-result: finished with ${payload}`;
+worker.register('send-welcome-email', async (payload: string) => {
+    console.log(`[NODE] Sending email based on payload: ${payload}`);
+    await new Promise(resolve => setTimeout(resolve, 1000));
+    return `{"email_sent": true, "timestamp": "${new Date().toISOString()}"}`;
 });
 
 worker.start('kafka:9092', 'workflow-workers-node');
