@@ -1,2 +1,2 @@
 export { Worker } from './worker';
-export { JobMessage, ResultMessage } from './models';
+export { WorkflowClient } from './client';

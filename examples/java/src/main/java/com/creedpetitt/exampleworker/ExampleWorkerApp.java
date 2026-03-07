@@ -31,6 +31,6 @@ public class ExampleWorkerApp {
         });
 
         // Start the worker
-        worker.start();
+        worker.start("jdbc:postgresql://postgres:5432/wf_engine", "admin", "admin");
     }
 }

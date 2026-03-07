@@ -8,4 +8,4 @@ worker.register('send-welcome-email', async (payload: string) => {
     return `{"email_sent": true, "timestamp": "${new Date().toISOString()}"}`;
 });
 
-worker.start('kafka:9092', 'workflow-workers-node');
+worker.start("postgresql://admin:admin@postgres:5432/wf_engine");

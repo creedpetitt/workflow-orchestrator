@@ -1,22 +1,19 @@
 package com.creedpetitt.orchestrator.service;
 
-import com.creedpetitt.orchestrator.config.Topics;
 import com.creedpetitt.orchestrator.dto.CreateWorkflowRequest;
-import com.creedpetitt.orchestrator.dto.ResultMessage;
 import com.creedpetitt.orchestrator.dto.TriggerWorkflowRequest;
-import com.creedpetitt.orchestrator.dto.JobMessage;
 import com.creedpetitt.orchestrator.exception.ResourceNotFoundException;
 import com.creedpetitt.orchestrator.exception.WorkflowExecutionException;
 import com.creedpetitt.orchestrator.model.StepResult;
 import com.creedpetitt.orchestrator.model.WorkflowDefinition;
+import com.creedpetitt.orchestrator.model.WorkflowJob;
 import com.creedpetitt.orchestrator.model.WorkflowRun;
 import com.creedpetitt.orchestrator.model.WorkflowStep;
 import com.creedpetitt.orchestrator.repository.WorkflowDefinitionRepository;
+import com.creedpetitt.orchestrator.repository.WorkflowJobRepository;
 import com.creedpetitt.orchestrator.repository.WorkflowRunRepository;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.extern.slf4j.Slf4j;
-import org.springframework.kafka.annotation.KafkaListener;
-import org.springframework.kafka.core.KafkaTemplate;
+import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -31,18 +28,16 @@ public class WorkflowService {
 
     private final WorkflowDefinitionRepository workflowRepo;
     private final WorkflowRunRepository workflowRunRepo;
-    private final KafkaTemplate<String, String> kafkaTemplate;
-    private final ObjectMapper objectMapper;
+    private final WorkflowJobRepository workflowJobRepo;
 
     public WorkflowService(
-            WorkflowDefinitionRepository workflowRepo, WorkflowRunRepository workflowRunRepo,
-            KafkaTemplate<String, String> kafkaTemplate,
-            ObjectMapper objectMapper
+            WorkflowDefinitionRepository workflowRepo, 
+            WorkflowRunRepository workflowRunRepo,
+            WorkflowJobRepository workflowJobRepo
     ) {
         this.workflowRepo = workflowRepo;
         this.workflowRunRepo = workflowRunRepo;
-        this.kafkaTemplate = kafkaTemplate;
-        this.objectMapper = objectMapper;
+        this.workflowJobRepo = workflowJobRepo;
     }
 
     @Transactional
@@ -82,11 +77,13 @@ public class WorkflowService {
                 .orElseThrow(() -> new ResourceNotFoundException("Workflow definition not found: " + id));
 
         WorkflowRun run = initializeWorkflowRun(runId, id, req.input(), idempotencyKey);
-
+        
+        // This save will throw a DataIntegrityViolationException if another thread 
+        // with the exact same idempotencyKey saves first, preventing race conditions.
         workflowRunRepo.save(run);
 
         WorkflowStep firstStep = workflow.getSteps().getFirst();
-        sendJobToKafka(new JobMessage(runId, firstStep.getAction(), req.input()));
+        createWorkflowJob(runId, firstStep.getAction(), req.input());
 
         return runId;
     }
@@ -117,45 +114,75 @@ public class WorkflowService {
                 .orElseThrow(() -> new ResourceNotFoundException("Workflow run not found: " + runId));
     }
 
+    @Scheduled(fixedDelay = 500)
     @Transactional
-    @KafkaListener(topics = Topics.WORKFLOW_RESULTS)
-    public void processResult(String message) {
-        ResultMessage result = deserializeMessage(message);
-        if (result == null) return;
+    public void pollForCompletedJobs() {
+        List<WorkflowJob> finishedJobs = workflowJobRepo.findByStatusIn(List.of("COMPLETED", "FAILED"));
 
-        WorkflowRun run = workflowRunRepo.findById(result.workflowRunId())
+        for (WorkflowJob job : finishedJobs) {
+            boolean keepJobInDatabase = false;
+            try {
+                keepJobInDatabase = processJobResult(job);
+            } catch (Exception e) {
+                log.error("Error processing completed job {}: {}", job.getId(), e.getMessage());
+            } finally {
+                // Delete successful jobs, but keep DEAD_LETTER and retrying jobs
+                if (!keepJobInDatabase && "COMPLETED".equals(job.getStatus())) {
+                    workflowJobRepo.delete(job);
+                }
+            }
+        }
+    }
+
+    private boolean processJobResult(WorkflowJob job) {
+        WorkflowRun run = workflowRunRepo.findById(job.getWorkflowRunId())
                 .orElse(null);
                 
         if (run == null) {
-            log.error("workflow run not found in Database: {}", result.workflowRunId());
-            return;
+            log.error("Workflow run not found in Database for job: {}", job.getWorkflowRunId());
+            return false;
+        }
+
+        if (!"RUNNING".equals(run.getStatus())) {
+            return false;
         }
 
         String workflowId = run.getWorkflowId();
         WorkflowDefinition workflow = workflowRepo.findById(workflowId)
                 .orElseThrow(() -> new ResourceNotFoundException("Workflow definition not found for run: " + workflowId));
 
-        recordStepResult(run, result);
+        recordStepResult(run, job.getAction(), job.getResult());
 
-        if ("FAILED".equals(result.status())) {
-            handleWorkflowFailure(run, result.result());
+        if ("FAILED".equals(job.getResultStatus())) {
+            
+            if (job.getRetryCount() < job.getMaxRetries()) {
+                // Retry Logic
+                job.setRetryCount(job.getRetryCount() + 1);
+                job.setStatus("PENDING");
+                job.setResult(null);
+                job.setResultStatus(null);
+                job.setLockedBy(null);
+                workflowJobRepo.save(job);
+                log.warn("Job failed, retrying. Run: {}, Action: {}, Attempt: {}/{}", run.getRunId(), job.getAction(), job.getRetryCount(), job.getMaxRetries());
+                
+                return false;
+            } else {
+                // Dead Letter Queue Logic
+                job.setStatus("DEAD_LETTER");
+                workflowJobRepo.save(job);
+                handleWorkflowFailure(run, job.getResult());
+                return true;
+            }
+            
         } else {
             int totalSteps = workflow.getSteps().size();
             if (run.getCurrentStep() >= totalSteps - 1) {
-                handleWorkflowCompletion(run, result.result());
+                handleWorkflowCompletion(run, job.getResult());
             } else {
-                handleNextStep(run, workflow, result.result());
+                handleNextStep(run, workflow, job.getResult());
             }
+            return false; // Safely delete successful jobs
         }
-    }
-
-    private void handleWorkflowFailure(WorkflowRun run, String errorResult) {
-        run.setStatus("FAILED");
-        run.setEndTime(LocalDateTime.now());
-        run.setFinalOutput(errorResult);
-        
-        workflowRunRepo.save(run);
-        log.error("Workflow failed: {} with error: {}", run.getRunId(), errorResult);
     }
 
     private WorkflowRun initializeWorkflowRun(String runId, String workflowId, String input, String idempotencyKey) {
@@ -170,33 +197,33 @@ public class WorkflowService {
         return run;
     }
 
-    private void sendJobToKafka(JobMessage job) {
-        try {
-            String jobJson = objectMapper.writeValueAsString(job);
-            kafkaTemplate.send(Topics.WORKFLOW_JOBS, jobJson);
-            log.info("Sent job to Kafka: {}", job.action());
-        } catch (Exception e) {
-            throw new WorkflowExecutionException("Failed to send job to Kafka", e);
-        }
+    private void createWorkflowJob(String runId, String action, String payload) {
+        WorkflowJob job = new WorkflowJob();
+        job.setWorkflowRunId(runId);
+        job.setAction(action);
+        job.setPayload(payload);
+        job.setStatus("PENDING");
+        workflowJobRepo.save(job);
+        log.info("Created workflow job for action: {}", action);
     }
 
-    private ResultMessage deserializeMessage(String message) {
-        try {
-            return objectMapper.readValue(message, ResultMessage.class);
-        } catch (Exception e) {
-            log.error("Could not deserialize workflow result: {}", message, e);
-            return null;
-        }
-    }
-
-    private void recordStepResult(WorkflowRun run, ResultMessage result) {
+    private void recordStepResult(WorkflowRun run, String action, String result) {
         StepResult stepResult = new StepResult();
         stepResult.setWorkflowRun(run);
-        stepResult.setAction(result.action());
+        stepResult.setAction(action);
         stepResult.setStepIndex(run.getCurrentStep());
-        stepResult.setResult(result.result());
+        stepResult.setResult(result);
         stepResult.setTimestamp(LocalDateTime.now());
         run.getStepResults().add(stepResult);
+    }
+
+    private void handleWorkflowFailure(WorkflowRun run, String errorResult) {
+        run.setStatus("FAILED");
+        run.setEndTime(LocalDateTime.now());
+        run.setFinalOutput(errorResult);
+        
+        workflowRunRepo.save(run);
+        log.error("Workflow failed: {} with error: {}", run.getRunId(), errorResult);
     }
 
     private void handleWorkflowCompletion(WorkflowRun run, String finalResult) {
@@ -213,7 +240,6 @@ public class WorkflowService {
         workflowRunRepo.save(run);
 
         WorkflowStep nextStep = workflow.getSteps().get(run.getCurrentStep());
-        JobMessage job = new JobMessage(run.getRunId(), nextStep.getAction(), currentResult);
-        sendJobToKafka(job);
+        createWorkflowJob(run.getRunId(), nextStep.getAction(), currentResult);
     }
 }
