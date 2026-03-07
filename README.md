@@ -1,15 +1,14 @@
 # Workflow Orchestrator
 
-A lightweight, distributed workflow orchestration engine designed to decouple state management from task execution. This project demonstrates a scalable pattern where a central Orchestrator manages the lifecycle of a workflow, while distributed Workers (written in any language) execute the actual business logic via Kafka.
+A lightweight, distributed workflow orchestration engine designed to decouple state management from task execution. This project demonstrates a scalable "Stateful Event Queue" pattern where a central Orchestrator manages the lifecycle of a workflow, while distributed Workers (written in any language) execute the actual business logic via pure PostgreSQL `SKIP LOCKED` polling.
 
 ## Architecture
 
-The system consists of three main parts:
-1. Orchestrator (Java/Spring Boot): Exposes a REST API to define and trigger workflows. It manages state in PostgreSQL and Redis, pushing "Jobs" to Kafka and listening for "Results".
-2. Message Broker (Kafka): Acts as the asynchronous communication layer.
-    * workflow-jobs: The Orchestrator publishes tasks here.
-    * workflow-results: Workers publish completed task results here.
-3. Workers (Polyglot): Stateless services that listen for specific tasks, execute them, and return results. SDKs are provided for Java, Python, and Node.js.
+The system consists of two main parts:
+1. **Orchestrator (Java/Spring Boot):** Exposes a REST API to define and trigger workflows. It manages all state and queuing inside a single PostgreSQL database.
+2. **Workers (Polyglot):** Stateless services that listen for specific tasks, execute them, and return results. SDKs are provided for Java, Python, and Node.js. 
+
+Instead of relying on heavy external message brokers like Kafka, the workers use their native SQL drivers to execute lightning-fast `SELECT ... FOR UPDATE SKIP LOCKED` queries against the Orchestrator's database. This provides robust, atomic job distribution with zero "Dual-Write" vulnerabilities.
 
 ## Getting Started
 
@@ -24,18 +23,13 @@ The entire infrastructure can be spun up using Docker Compose. A Makefile is pro
 **Option 1: Using Make (Recommended)**
 
 ```bash
-# Start everything (Java, Node, Python workers)
+# Start the DB, Orchestrator, and all 3 Polyglot Workers
 make all
 
-# Start specific workers
-make java
-make node
-make python
-
 # Stop everything
-make stop
+make down
 
-# Wipe data (Database & Redis)
+# Wipe data (Database)
 make clean
 ```
 
@@ -45,83 +39,59 @@ make clean
 docker compose --profile all up -d --build
 ```
 
-### Dashboard
-Once running, verify the system status:
-* Active Runs: http://localhost:8080/workflow/runs
-* Workflow Definitions: http://localhost:8080/workflow/
-
 ## Reliability and Fault Tolerance
 
-This engine is built for resilience. It handles network failures, worker crashes, and duplicate requests gracefully.
+This engine is built for resilience. It natively handles worker crashes, network timeouts, and duplicate requests.
 
-### 1. Idempotency (Redis Locks)
-To prevent duplicate execution, the Orchestrator enforces idempotency via Redis.
-* Mechanism: When triggering a workflow, clients can send an Idempotency-Key header.
-* Behavior: The system checks Redis for this key. If found, it returns the existing runId immediately without spawning a new workflow.
+### 1. Idempotency (Postgres Unique Constraints)
+To prevent duplicate execution, the Orchestrator enforces idempotency natively at the database level.
+* **Mechanism:** When triggering a workflow, clients can provide an `Idempotency-Key`.
+* **Behavior:** The system checks the `workflow_run` table for this key. If another thread attempts to write the same key simultaneously, Postgres's ACID guarantees throw a safe constraint violation, returning the existing `runId` immediately.
 
 ### 2. Automatic Retries
-Workers are decoupled from the Orchestrator via Kafka. If a worker fails (e.g., database glitch, API timeout):
-* The system automatically retries the task 3 times.
-* It uses a 1-second delay between attempts to allow the downstream system to recover.
+If a worker fails (e.g., database glitch, API timeout) or explicitly throws an Exception:
+* The Orchestrator automatically intercepts the failure.
+* It increments a retry counter and safely returns the job to the `PENDING` queue.
+* The system defaults to 3 max retries before failing the job permanently.
 
 ### 3. Dead Letter Queues (DLQ)
-If a task fails after all retries (e.g., a "Poison Pill" message that always crashes the worker):
-* The message is moved to a specific Dead Letter Topic (workflow-jobs.DLT).
-* This prevents the bad message from blocking the partition and allows the rest of the system to continue processing.
-
-## API Usage
-
-### 1. Define a Workflow
-Create a new workflow definition by specifying the sequence of steps (actions).
-
-**POST** http://localhost:8080/workflow/
-
-```json
-{
-  "id": "my-first-workflow",
-  "steps": [
-    {
-      "action": "step1",
-      "stepIndex": 0
-    },
-    {
-      "action": "step2",
-      "stepIndex": 1
-    }
-  ]
-}
-```
-
-### 2. Trigger a Workflow
-Start an instance of a defined workflow with an initial input.
-
-**POST** http://localhost:8080/workflow/my-first-workflow/trigger
-
-**Headers:**
-* Idempotency-Key: (Optional) unique-request-id to prevent double-execution.
-
-**Body:**
-```json
-{
-  "input": "Hello World"
-}
-```
-*Returns a runId (e.g., 550e8400-e29b-41d4-a716-446655440000).*
-
-### 3. Check Status
-Monitor the progress of a specific run.
-
-**GET** http://localhost:8080/workflow/run/{runId}
+If a task fails after all retries (e.g., a "Poison Pill" message):
+* The Orchestrator marks the job status as `DEAD_LETTER`.
+* The row is left in the queue table for manual inspection and debugging, preventing it from infinitely looping or blocking other workers.
 
 ---
 
-## Developing Workers
+## Developing with the SDKs
 
-Workers use the provided SDKs to connect to the orchestrator. You simply register a handler function for a specific action string.
+The repository provides beautiful, native SDKs so developers never have to write raw HTTP requests or JSON.
 
-### Python Worker
-Located in examples/python/.
+### 1. Defining & Triggering Workflows (The Client SDK)
+Use the `WorkflowClient` in your main application to interact with the Orchestrator.
 
+```python
+from workersdk import WorkflowClient
+
+client = WorkflowClient("http://localhost:8080")
+
+# 1. Define the Blueprint
+client.define_workflow("checkout-pipeline", [
+    "charge-credit-card", 
+    "generate-invoice",
+    "send-welcome-email"
+])
+
+# 2. Trigger an Instance securely
+run_id = client.trigger_workflow("checkout-pipeline", '{"order_id": 123}', idempotency_key="order-123")
+
+# 3. Check the Status
+status = client.get_run_status(run_id)
+print(status)
+```
+
+### 2. Processing Steps (The Worker SDK)
+Deploy lightweight microservices using the `Worker` class to actually perform the actions.
+
+#### Python Worker
 ```python
 from workersdk import Worker
 
@@ -129,35 +99,31 @@ def main():
     worker = Worker()
 
     # Register handlers for specific actions
-    worker.register("step1", lambda payload: f"Processed: {payload}")
+    worker.register("generate-invoice", lambda payload: f"PDF Generated for: {payload}")
     
-    # Connects to Kafka and starts listening
-    worker.start()
+    # Connects to Postgres and starts polling
+    worker.start("postgresql://admin:admin@postgres:5432/wf_engine")
 
 if __name__ == "__main__":
     main()
 ```
 
-### Node.js Worker
-Located in examples/node/.
-
+#### Node.js Worker
 ```typescript
 import { Worker } from 'workersdk';
 
 const worker = new Worker();
 
-worker.register('step1', (payload: string) => {
-    console.log('Handling step 1');
-    return `Node processed: ${payload}`;
+worker.register('send-welcome-email', async (payload: string) => {
+    // Simulate async IO
+    await new Promise(resolve => setTimeout(resolve, 1000));
+    return `Email sent to ${payload}`;
 });
 
-// Unique Group ID to avoid conflicts
-worker.start("kafka:9092", "workflow-workers-node");
+worker.start("postgresql://admin:admin@postgres:5432/wf_engine");
 ```
 
-### Java Worker
-Located in examples/java/.
-
+#### Java Worker
 ```java
 import com.creedpetitt.workersdk.Worker;
 
@@ -165,19 +131,17 @@ public class ExampleWorkerApp {
     public static void main(String[] args) {
         Worker worker = new Worker();
 
-        worker.register("step1", payload -> {
-            return "Java processed: " + payload;
+        worker.register("charge-credit-card", payload -> {
+            return "Payment Processed: " + payload;
         });
 
-        worker.start();
+        worker.start("jdbc:postgresql://postgres:5432/wf_engine", "admin", "admin");
     }
 }
 ```
 
 ## Tech Stack
 
-* Core: Java 21, Spring Boot 3
-* Messaging: Apache Kafka (KRaft Mode)
-* Database: PostgreSQL 16
-* Caching: Redis 7
-* SDK Languages: Java, Python 3.11, Node.js 20 (TypeScript)
+* **Core:** Java 21, Spring Boot 3
+* **Database & Queue Engine:** PostgreSQL 16
+* **SDK Languages:** Java (JDBI), Python 3.11 (psycopg2), Node.js 20 (pg)
