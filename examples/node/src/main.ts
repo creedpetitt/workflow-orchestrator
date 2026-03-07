@@ -10,4 +10,4 @@ worker.register('step2', (payload: string) => {
     return `step2-result: finished with ${payload}`;
 });
 
-worker.start('kafka:9092', 'workflow-workers-node');
+worker.start("postgresql://admin:admin@postgres:5432/wf_engine");

@@ -1,71 +1,102 @@
 import json
 import time
+import uuid
+import psycopg2
+from psycopg2.extras import DictCursor
 from typing import Callable, Dict
-from kafka import KafkaConsumer, KafkaProducer
-from .models import JobMessage, ResultMessage
 
 class Worker:
     def __init__(self):
         self.handlers: Dict[str, Callable[[str], str]] = {}
-        self.consumer = None
-        self.producer = None
+        self.connection = None
+        self.worker_id = f"python-worker-{str(uuid.uuid4())[:8]}"
 
     def register(self, action: str, handler: Callable[[str], str]):
         self.handlers[action] = handler
 
-    def start(self, bootstrap_servers: str = 'kafka:9092', group_id: str = 'workflow-workers-python'):
-        # Retry connection to Kafka
+    def start(self, dsn: str = "postgresql://admin:admin@postgres:5432/wf_engine"):
+        self._connect_with_retry(dsn)
+        
+        print(f"Worker {self.worker_id} started, listening for jobs via Postgres SKIP LOCKED...")
+        
+        try:
+            while True:
+                self._poll_and_process()
+                time.sleep(0.5)  # Poll every 500ms
+        except KeyboardInterrupt:
+            print("Worker stopping...")
+        finally:
+            if self.connection:
+                self.connection.close()
+
+    def _poll_and_process(self):
+        if not self.handlers:
+            return
+
+        actions = list(self.handlers.keys())
+        
+        with self.connection.cursor(cursor_factory=DictCursor) as cursor:
+            try:
+                claim_sql = """
+                    UPDATE workflow_job 
+                    SET status = 'PROCESSING', locked_by = %s
+                    WHERE id = (
+                        SELECT id FROM workflow_job 
+                        WHERE status = 'PENDING' AND action = ANY(%s)
+                        ORDER BY created_at ASC
+                        LIMIT 1 
+                        FOR UPDATE SKIP LOCKED
+                    )
+                    RETURNING id, workflow_run_id, action, payload
+                """
+                
+                cursor.execute(claim_sql, (self.worker_id, actions))
+                job_row = cursor.fetchone()
+
+                if not job_row:
+                    self.connection.commit()
+                    return # No jobs available
+
+                job_id = job_row['id']
+                run_id = job_row['workflow_run_id']
+                action = job_row['action']
+                payload = job_row['payload']
+
+                print(f"Processing job: {action} for run: {run_id}")
+
+                handler = self.handlers.get(action)
+                status = "SUCCESS"
+                
+                try:
+                    result = handler(payload)
+                except Exception as e:
+                    # Safely construct JSON error
+                    result = json.dumps({"error": str(e)})
+                    status = "FAILED"
+
+                update_sql = """
+                    UPDATE workflow_job 
+                    SET status = 'COMPLETED', result = %s, result_status = %s
+                    WHERE id = %s
+                """
+                cursor.execute(update_sql, (result, status, job_id))
+                
+                self.connection.commit()
+                
+            except Exception as e:
+                self.connection.rollback()
+                print(f"Error in polling transaction: {e}")
+
+    def _connect_with_retry(self, dsn: str):
         for attempt in range(30):
             try:
-                # We do NOT use value_deserializer here, to prevent the consumer loop from crashing on bad data
-                self.consumer = KafkaConsumer(
-                    'workflow-jobs',
-                    bootstrap_servers=bootstrap_servers,
-                    group_id=group_id,
-                    auto_offset_reset='earliest'
-                )
-                self.producer = KafkaProducer(
-                    bootstrap_servers=bootstrap_servers,
-                    value_serializer=lambda v: json.dumps(v).encode('utf-8')
-                )
-                # Test connection by requesting partitions
-                self.consumer.partitions_for_topic('workflow-jobs')
-                break
+                self.connection = psycopg2.connect(dsn)
+                # Test connection
+                with self.connection.cursor() as cur:
+                    cur.execute('SELECT 1')
+                return
             except Exception as e:
-                print(f"Kafka not ready, retrying ({attempt + 1}/30)...")
+                print(f"Postgres not ready, retrying ({attempt + 1}/30)...")
                 time.sleep(2)
         else:
-            raise Exception("Could not connect to Kafka after 30 attempts")
-
-        print(f"Worker started, listening for jobs in group: {group_id}...")
-
-        for message in self.consumer:
-            try:
-                # Safely decode and parse the JSON inside the loop
-                raw_value = message.value.decode('utf-8')
-                job_dict = json.loads(raw_value)
-                job = JobMessage.from_dict(job_dict)
-            except Exception as e:
-                print(f"Failed to decode or parse message, skipping. Error: {e}")
-                continue
-
-            handler = self.handlers.get(job.action)
-            if not handler:
-                # Ignore silently, meant for another worker type
-                continue
-
-            print(f"Processing job: {job.action}")
-
-            try:
-                result = handler(job.payload)
-                status = "SUCCESS"
-            except Exception as e:
-                # Safely construct JSON error
-                result = json.dumps({"error": str(e)})
-                status = "FAILED"
-
-            response = ResultMessage(job.workflow_run_id, job.action, result, status)
-
-            self.producer.send('workflow-results', value=response.to_dict())
-
-        self.producer.flush()
+            raise Exception("Could not connect to Postgres after 30 attempts")

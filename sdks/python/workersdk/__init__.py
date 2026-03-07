@@ -1,4 +1,4 @@
 from .worker import Worker
-from .models import JobMessage, ResultMessage
+from .client import WorkflowClient
 
-__all__ = ["Worker", "JobMessage", "ResultMessage"]
+__all__ = ["Worker", "WorkflowClient"]
